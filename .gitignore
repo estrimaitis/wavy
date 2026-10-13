@@ -1,0 +1,7 @@
+.venv/
+models/
+data/
+__pycache__/
+*.pyc
+.claude/
+samples/

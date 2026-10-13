@@ -1,0 +1,13 @@
+# PyTorch is installed separately by setup.bat (CUDA 12.8 build for RTX 50-series / CPU fallback).
+audio-separator==0.47.0
+audioread==3.1.0
+faster-whisper==1.2.1
+ctranslate2==4.8.3
+transformers==5.19.0
+scikit-learn==1.9.1
+librosa==1.0.0
+soundfile==0.14.0
+numpy==2.5.4
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32

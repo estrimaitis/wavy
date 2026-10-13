@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wavy: unbake any song</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111520'/%3E%3Cpath d='M5 16h3l2-7 3 14 3-18 3 20 3-14 2 5h3' stroke='%23ff5d8f' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 16h4l2.5-8 3.5 16 3.5-20 3.5 22 3.5-16 2.5 6h3" /></svg>
+      <span>wavy</span>
+    </a>
+    <span class="tagline">unbake any song</span>
+    <span class="gpu" id="gpu"></span>
+  </header>
+
+  <!-- Home: drop zone + library -->
+  <main id="view-home" class="view">
+    <section class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a song to unbake">
+      <div class="drop-inner">
+        <div class="drop-wave" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <h1>Drop a song to unbake it</h1>
+        <p>Every voice, every instrument, the reverb and the lyrics, pulled apart into their own tracks.</p>
+        <button class="btn primary" id="pick">Choose a file</button>
+        <p class="formats">MP3 · WAV · FLAC · M4A · OGG · AIFF · even video files</p>
+      </div>
+      <input type="file" id="file" accept="audio/*,video/*,.flac,.m4a,.aiff,.aif,.opus,.wma" hidden>
+    </section>
+
+    <details class="options" id="options">
+      <summary>Options</summary>
+      <label><input type="checkbox" id="opt-singers" checked> Give each singer their own track</label>
+      <label><input type="checkbox" id="opt-drumkit" checked> Split the drum kit (kick, snare, hi-hat, cymbals…)</label>
+      <label><input type="checkbox" id="opt-lyrics" checked> Transcribe synced lyrics</label>
+      <label class="lang">Lyrics language
+        <select id="opt-language">
+          <option value="">Detect automatically</option>
+          <option value="en">English</option><option value="es">Spanish</option><option value="pt">Portuguese</option>
+          <option value="fr">French</option><option value="de">German</option><option value="it">Italian</option>
+          <option value="ja">Japanese</option><option value="ko">Korean</option><option value="zh">Chinese</option>
+          <option value="ru">Russian</option><option value="uk">Ukrainian</option><option value="pl">Polish</option>
+          <option value="lt">Lithuanian</option><option value="nl">Dutch</option><option value="sv">Swedish</option>
+          <option value="tr">Turkish</option><option value="hi">Hindi</option><option value="ar">Arabic</option>
+        </select>
+      </label>
+    </details>
+
+    <section class="library">
+      <h2>Your songs</h2>
+      <ul id="library"></ul>
+      <p class="empty-note" id="library-empty">Nothing here yet. Drop a song above<span id="demo-offer">, or
+        <button class="linkish" id="try-demo">unbake the built-in demo duet</button> to see what it does</span>.</p>
+    </section>
+  </main>
+
+  <!-- Processing -->
+  <main id="view-processing" class="view" hidden>
+    <section class="processing">
+      <p class="eyebrow">Unbaking</p>
+      <h1 id="proc-name"></h1>
+      <div class="bar"><div id="proc-bar"></div></div>
+      <p class="proc-meta"><span id="proc-pct">0%</span> · <span id="proc-elapsed">0:00</span> elapsed <span id="proc-queue"></span></p>
+      <ol class="stages" id="proc-stages"></ol>
+      <p class="hint">The first song downloads the AI models (about 3 GB). Later songs start straight away. You can leave this page; the song keeps processing.</p>
+      <div class="error" id="proc-error" hidden></div>
+      <button class="btn" id="proc-retry" hidden>Remove and try another file</button>
+    </section>
+  </main>
+
+  <!-- Mixer -->
+  <main id="view-mixer" class="view" hidden>
+    <section class="song-head">
+      <div>
+        <p class="eyebrow">Unbaked</p>
+        <h1 id="song-name" contenteditable="true" spellcheck="false"></h1>
+        <p class="song-meta" id="song-meta"></p>
+      </div>
+      <div class="song-actions">
+        <a class="btn primary" id="dl-zip">Download all tracks</a>
+        <div class="dropdown" id="dl-lyrics-wrap">
+          <button class="btn" id="dl-lyrics-btn">Lyrics ▾</button>
+          <div class="menu" id="dl-lyrics-menu" hidden>
+            <a id="dl-lrc">Synced (.lrc)</a><a id="dl-srt">Subtitles (.srt)</a><a id="dl-txt">Plain text (.txt)</a>
+          </div>
+        </div>
+        <button class="btn ghost" id="delete-song" title="Delete this song">Delete</button>
+      </div>
+    </section>
+
+    <section class="transport">
+      <button class="play" id="play" aria-label="Play" disabled>
+        <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></svg>
+        <svg class="i-pause" viewBox="0 0 24 24"><path d="M6 4h4.5v16H6zM13.5 4H18v16h-4.5z"/></svg>
+      </button>
+      <div class="time"><span id="t-cur">0:00</span><span class="sep">/</span><span id="t-dur">0:00</span></div>
+      <div class="ab" role="group" aria-label="Listen to">
+        <button id="ab-stems" class="on">Unbaked</button><button id="ab-orig">Original</button>
+      </div>
+      <label class="master">Master <input type="range" id="master" min="0" max="1.25" step="0.01" value="1"></label>
+      <button class="btn small ghost" id="reset-mix" title="Unmute, unsolo and reset all faders">Reset mix</button>
+      <span class="loading" id="loading"></span>
+    </section>
+
+    <div class="workspace">
+      <section class="tracks" id="tracks">
+        <div class="ruler-row"><div class="ctrl-spacer"></div><canvas id="ruler" height="22"></canvas></div>
+        <div id="track-list"></div>
+        <div class="playhead" id="playhead"></div>
+      </section>
+      <aside class="lyrics" id="lyrics-panel">
+        <div class="lyrics-head">
+          <h2>Lyrics</h2>
+          <div class="legend" id="legend"></div>
+        </div>
+        <div class="lyrics-body" id="lyrics"></div>
+      </aside>
+    </div>
+    <p class="keys">Space play/pause · ← → skip 5 s · click a waveform or a lyric line to jump · double-click a fader to reset</p>
+  </main>
+
+  <div class="toast" id="toast" hidden></div>
+  <div class="dragcover" id="dragcover" hidden><div>Drop to unbake</div></div>
+
+  <template id="track-tpl">
+    <div class="track">
+      <div class="ctrl">
+        <span class="swatch"></span>
+        <div class="names"><span class="label"></span><span class="note"></span></div>
+        <div class="buttons">
+          <button class="m" title="Mute (M)">M</button>
+          <button class="s" title="Solo (S)">S</button>
+        </div>
+        <input class="vol" type="range" min="0" max="1.5" step="0.01" value="1" title="Volume">
+        <canvas class="meter" width="6" height="40"></canvas>
+        <a class="dl" title="Download this track">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>
+        </a>
+      </div>
+      <canvas class="wave"></canvas>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
