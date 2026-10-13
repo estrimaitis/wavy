@@ -17,6 +17,8 @@
     <span class="gpu" id="gpu"></span>
   </header>
 
+  <div class="banner" id="banner" hidden></div>
+
   <!-- Home: drop zone + library -->
   <main id="view-home" class="view">
     <section class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a song to unbake">
@@ -68,7 +70,11 @@
       <ol class="stages" id="proc-stages"></ol>
       <p class="hint">The first song downloads the AI models (about 3 GB). Later songs start straight away. You can leave this page; the song keeps processing.</p>
       <div class="error" id="proc-error" hidden></div>
-      <button class="btn" id="proc-retry" hidden>Remove and try another file</button>
+      <div class="proc-actions">
+        <button class="btn" id="proc-cancel" hidden>Cancel</button>
+        <button class="btn primary" id="proc-again" hidden>Try again</button>
+        <button class="btn ghost" id="proc-remove" hidden>Remove</button>
+      </div>
     </section>
   </main>
 

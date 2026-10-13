@@ -101,14 +101,23 @@ def convolve(x, ir):
 
 
 def main(tts_dir, out_path, truth_dir=None):
+    """The default demo: lines alternate between the male and female voice, one every two bars."""
     lines = sorted(Path(tts_dir).glob("line*.wav"))
-    intro_bars = 2
-    bars = intro_bars + len(lines) * 2 + 2
+    events = [(read_wav(p), "female" if "female" in p.name else "male", (2 + i * 2) * BAR + 0.2)
+              for i, p in enumerate(lines)]
+    build(events, out_path, truth_dir)
+
+
+def build(events, out_path, truth_dir=None):
+    """Mix voice `events` [(mono audio, voice name, start seconds)] over drums, bass and a pad.
+
+    Writes the mix, and with `truth_dir` each voice, the reverb, drums, bass and pad on their own."""
+    end = max(start + len(audio) / SR for audio, _, start in events)
+    bars = int(np.ceil(end / BAR)) + 2
     total = bars * BAR + 2
     drums = np.zeros(int(total * SR))
     bass = np.zeros_like(drums)
     pad = np.zeros_like(drums)
-    vox = np.zeros_like(drums)
 
     # A minor - F - C - G
     roots = [55.0, 43.65, 65.41, 49.0]
@@ -134,23 +143,20 @@ def main(tts_dir, out_path, truth_dir=None):
     bass = lowpass(bass, 0.03)
     pad = lowpass(pad, 0.08)
 
-    voices = {"male": np.zeros_like(drums), "female": np.zeros_like(drums)}
-    for i, path in enumerate(lines):
-        who = "female" if "female" in path.name else "male"
-        add(voices[who], read_wav(path), (intro_bars + i * 2) * BAR + 0.2, 0.9)
-    vox = voices["male"] + voices["female"]
+    voices = {}
+    for audio, who, start in events:
+        add(voices.setdefault(who, np.zeros_like(drums)), audio, start, 0.9)
+    vox = sum(voices.values())
     wet = convolve(vox, reverb_ir())[: len(vox)]
     wet *= np.sqrt(np.sum(vox ** 2) / np.sum(wet ** 2)) * 10 ** (-12 / 20)  # typical pop vocal: reverb ~12 dB under dry
 
-    pad_l, pad_r = pad * 1.1, pad * 0.9
-    stems = {
-        "male": np.stack([voices["male"]] * 2, 1),
-        "female": np.stack([voices["female"]] * 2, 1),
+    stems = {who: np.stack([v] * 2, 1) for who, v in voices.items()}
+    stems.update({
         "reverb": np.stack([wet] * 2, 1),
         "drums": np.stack([drums * 0.8] * 2, 1),
         "bass": np.stack([bass] * 2, 1),
-        "pad": np.stack([pad_l, pad_r], 1),
-    }
+        "pad": np.stack([pad * 1.1, pad * 0.9], 1),
+    })
     mix = sum(stems.values())
     scale = 1 / (np.max(np.abs(mix)) * 1.12)
     out = Path(out_path)

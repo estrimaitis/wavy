@@ -2,8 +2,7 @@
 
 Voice-separation models can't tell *who* is singing, so we diarize instead:
   1. find sung regions by energy,
-  2. embed ~1.5 s windows with a speaker-verification network (WavLM x-vectors) and
-     measure their pitch,
+  2. embed ~1.5 s windows with a speaker-verification network (WavLM x-vectors),
   3. cluster the windows into singers (automatically picking how many, 1-4),
   4. turn the per-frame labels into smooth gain masks that partition the stem,
      so the singer tracks always sum back to the original vocal.
@@ -23,6 +22,7 @@ HOP = 0.5
 MIN_SEGMENT = 0.6     # shorter singer turns get merged into a neighbour (s)
 FADE = 0.04           # crossfade between singers (s)
 MAX_SINGERS = 4
+SAME_SINGER = 0.45  # x-vector cosine distance; see _cluster
 
 
 @dataclass
@@ -95,29 +95,29 @@ def _pitch(chunk: np.ndarray) -> float:
     return float(np.median(good)) if len(good) else 0.0
 
 
-def _cluster(emb: np.ndarray, f0: np.ndarray) -> np.ndarray:
+def _cluster(emb: np.ndarray) -> np.ndarray:
+    """Group windows into singers by voice identity alone.
+
+    Pitch is deliberately left out: it's exactly what changes when one singer moves from verse to
+    chorus. Measured average x-vector distance (tools/singer_bench.py): the same singer across a
+    5-semitone register jump ~0.2, two different singers 0.63 to 0.72, so 0.45 splits them cleanly."""
     from sklearn.cluster import AgglomerativeClustering
-    from sklearn.metrics import silhouette_score
 
     n = len(emb)
     if n < 4:
         return np.zeros(n, dtype=int)
-    cos = 1 - emb @ emb.T
-    logf = np.log2(np.where(f0 > 0, f0, np.median(f0[f0 > 0]) if np.any(f0 > 0) else 200))
-    pitch = np.abs(logf[:, None] - logf[None, :])
-    dist = np.clip(cos + 0.35 * np.minimum(pitch, 1.5), 0, None)
+    dist = np.clip(1 - emb @ emb.T, 0, None)
     np.fill_diagonal(dist, 0)
+    raw = AgglomerativeClustering(n_clusters=None, distance_threshold=SAME_SINGER, metric="precomputed",
+                                  linkage="average").fit_predict(dist)
 
-    best_labels, best_score = np.zeros(n, dtype=int), 0.0
-    for k in range(2, min(MAX_SINGERS, n - 1) + 1):
-        labels = AgglomerativeClustering(n_clusters=k, metric="precomputed", linkage="average").fit_predict(dist)
-        if np.bincount(labels).min() < max(2, 0.06 * n):
-            continue
-        score = silhouette_score(dist, labels, metric="precomputed")
-        if score > best_score + 0.03:
-            best_labels, best_score = labels, score
-    # Below this, the "clusters" are one voice moving around its range.
-    return best_labels if best_score >= 0.22 else np.zeros(n, dtype=int)
+    # Stray mini-groups (a breath, an ad-lib, a bit of bleed) fold into the nearest real singer.
+    counts = np.bincount(raw)
+    keep = [int(c) for c in np.argsort(-counts) if counts[c] >= max(2, 0.06 * n)][:MAX_SINGERS]
+    if len(keep) <= 1:
+        return np.zeros(n, dtype=int)
+    to_kept = np.stack([dist[:, raw == c].mean(axis=1) for c in keep], axis=1)
+    return np.array([keep.index(r) if r in keep else int(np.argmin(to_kept[i])) for i, r in enumerate(raw)])
 
 
 def _smooth(labels: np.ndarray) -> np.ndarray:
@@ -162,7 +162,7 @@ def split(vocal: np.ndarray) -> tuple[list[np.ndarray], list[Singer], np.ndarray
 
     samples = int(FRAME * 16000)
     chunks = [mono16[s * samples:(s + win) * samples] for s in starts]
-    labels_win = _cluster(_embed(chunks), np.array([_pitch(c) for c in chunks]))
+    labels_win = _cluster(_embed(chunks))
 
     # Frame labels: each voiced frame takes the label of the window centred nearest to it.
     centres = np.array(starts) + win // 2

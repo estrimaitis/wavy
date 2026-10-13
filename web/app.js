@@ -77,7 +77,7 @@ function saveOptions() {
   } catch { /* storage unavailable */ }
 }
 
-const STATUS_TEXT = { queued: "Queued", running: "Unbaking…", done: "Ready", error: "Failed" };
+const STATUS_TEXT = { queued: "Queued", running: "Unbaking…", done: "Ready", error: "Failed", cancelled: "Cancelled" };
 
 async function openHome() {
   showView("home");
@@ -187,6 +187,12 @@ async function openSong(id, startAt = 0) {
   }
 }
 
+function renderProcessingSoon(job) {
+  if (!current || current.id !== job.id) return;
+  clearTimeout(current.poll);
+  renderProcessing(job);
+}
+
 function renderProcessing(job) {
   $("#proc-name").textContent = job.name;
   const pct = Math.round((job.progress || 0) * 100);
@@ -218,14 +224,28 @@ function renderProcessing(job) {
   });
 
   const err = $("#proc-error");
+  const ended = job.status === "error" || job.status === "cancelled";
   err.hidden = job.status !== "error";
-  $("#proc-retry").hidden = job.status !== "error";
-  $("#proc-retry").onclick = async () => {
+  $("#proc-again").hidden = !ended;
+  $("#proc-remove").hidden = !ended;
+  const cancel = $("#proc-cancel");
+  cancel.hidden = ended;
+  cancel.disabled = !!job.cancelling;
+  cancel.textContent = job.cancelling ? "Cancelling…" : "Cancel";
+  cancel.onclick = async () => {
+    cancel.disabled = true;
+    try { renderProcessingSoon(await api(`/api/jobs/${job.id}/cancel`, { method: "POST" })); } catch (e) { toast(e.message); }
+  };
+  $("#proc-again").onclick = async () => {
+    try { renderProcessingSoon(await api(`/api/jobs/${job.id}/retry`, { method: "POST" })); } catch (e) { toast(e.message); }
+  };
+  $("#proc-remove").onclick = async () => {
     try { await api(`/api/jobs/${job.id}`, { method: "DELETE" }); } catch { /* already gone */ }
     location.hash = "#/";
   };
-  if (job.status === "error") {
-    err.textContent = job.error;
+  if (ended) {
+    if (job.status === "error") err.textContent = job.error;
+    $("#proc-pct").textContent = job.status === "cancelled" ? "Cancelled" : "Failed";
     return;
   }
   if (job.status === "done") { route(); return; }
@@ -238,6 +258,8 @@ function renderProcessing(job) {
 
 /* ------------------------------------------------------------------ mixer */
 
+const MEMORY_BUDGET = 1.2 * 2 ** 30; // bytes of decoded audio we're willing to hold in the tab
+
 const GROUPS = [
   ["voices", "Voices"],
   ["drums", "Drums"],
@@ -249,7 +271,13 @@ class Mixer {
     this.job = job;
     this.r = job.result;
     this.duration = this.r.duration;
-    this.ctx = new AudioContext({ latencyHint: "playback" });
+    // Every audible stem is decoded into memory (float32 stereo). Long songs would need gigabytes,
+    // so play them back at a lower rate. Downloads are always full quality.
+    const streams = job.result.tracks.filter((t) => !t.empty).length + 1;
+    const fullBytes = streams * this.duration * 2 * 4 * 44100;
+    const rate = Math.max(22050, Math.min(44100, Math.floor(44100 * MEMORY_BUDGET / fullBytes)));
+    this.reducedQuality = rate < 44100;
+    this.ctx = new AudioContext({ latencyHint: "playback", sampleRate: rate });
     this.master = this.ctx.createGain();
     this.master.connect(this.ctx.destination);
     this.stemBus = this.ctx.createGain();
@@ -514,21 +542,28 @@ class Mixer {
       if (this.alive) label.textContent = `Loading tracks ${done}/${todo.length + 1}…`;
       return buf;
     };
-    try {
-      const queue = [...todo.map((t) => [t, t.file]), [null, this.r.original.file]];
-      const workers = Array.from({ length: 4 }, async () => {
-        while (queue.length && this.alive) {
-          const [t, file] = queue.shift();
+    // One bad stem shouldn't take the whole mixer down: load what we can, flag the rest.
+    const failed = [];
+    const queue = [...todo.map((t) => [t, t.file]), [null, this.r.original.file]];
+    const workers = Array.from({ length: 4 }, async () => {
+      while (queue.length && this.alive) {
+        const [t, file] = queue.shift();
+        try {
           const buf = await fetchBuf(file);
           if (t) t.buffer = buf; else this.origBuffer = buf;
+        } catch (e) {
+          failed.push(t ? t.label : "Original mix");
+          if (t) { $(".note", t.el).textContent = "couldn't load this track"; t.el.classList.add("muted"); }
         }
-      });
-      await Promise.all(workers);
-    } catch (e) {
-      if (this.alive) label.textContent = `Couldn't load audio: ${e.message}`;
+      }
+    });
+    await Promise.all(workers);
+    if (!this.alive) return;
+    if (!todo.some((t) => t.buffer)) {
+      label.textContent = "Couldn't load the audio. Is the server still running?";
       return;
     }
-    if (!this.alive) return;
+    if (!this.origBuffer) $("#ab-orig").disabled = true;
     for (const t of this.tracks) {
       if (!t.buffer) continue;
       t.gain = this.ctx.createGain();
@@ -538,7 +573,8 @@ class Mixer {
       t.gain.connect(this.stemBus);
     }
     this.meterBuf = new Float32Array(512);
-    label.textContent = "";
+    label.textContent = failed.length ? `Couldn't load: ${failed.join(", ")}`
+      : this.reducedQuality ? "Long song: previewing at reduced quality to save memory (downloads are full quality)" : "";
     $("#play").disabled = false;
     this.applyGains();
   }
@@ -694,6 +730,10 @@ async function boot() {
     el.textContent = h.gpu ? h.gpu.replace("NVIDIA GeForce ", "") : "CPU mode (slow)";
     el.classList.toggle("on", !!h.gpu);
     if (!h.demo) $("#demo-offer").hidden = true;
+    if (!h.ffmpeg) {
+      $("#banner").textContent = "ffmpeg isn't installed, so songs can't be read. Install it (Windows: winget install Gyan.FFmpeg, macOS: brew install ffmpeg), then restart Wavy.";
+      $("#banner").hidden = false;
+    }
   } catch { /* offline */ }
 }
 boot();

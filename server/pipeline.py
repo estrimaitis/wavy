@@ -8,6 +8,7 @@
                                     └─ (vocal bleed) → folded into backing vocals
     dry vocals ── Whisper ── words/lines, each tagged with the singer who sings it
 """
+import gc
 import json
 import os
 import shutil
@@ -55,15 +56,52 @@ Report = Callable[[str, float], None]
 
 def run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
     """Process `source` into job_dir/stems. Returns the result manifest (also saved to result.json)."""
+    try:
+        return _run(job_dir, source, options, report)
+    except BaseException:
+        shutil.rmtree(job_dir / "stems", ignore_errors=True)  # half-written stems are useless
+        raise
+    finally:
+        if not os.environ.get("WAVY_KEEP_WORK"):
+            shutil.rmtree(job_dir / "work", ignore_errors=True)  # a few GB of intermediates per song
+
+
+DISPLAY_ORDER = ["backing", "reverb", "kick", "snare", "toms", "hihat", "ride", "crash", "drums", "drums_rest",
+                 "bass", "guitar", "piano", "other"]
+
+
+def _display_key(track: dict):
+    if track["id"].startswith("singer_"):
+        return (0, int(track["id"][7:]))
+    return (1, DISPLAY_ORDER.index(track["id"]) if track["id"] in DISPLAY_ORDER else len(DISPLAY_ORDER))
+
+
+def _run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
+    # Memory: every stem is ~250 MB per 12 minutes of audio, so each one is written out and dropped the
+    # moment it's final instead of all of them waiting in RAM for the end.
     work = job_dir / "work"
     stems_dir = job_dir / "stems"
     work.mkdir(parents=True, exist_ok=True)
     stems_dir.mkdir(parents=True, exist_ok=True)
     timings: dict[str, float] = {}
+    tracks: dict[str, dict] = {}
 
     def stage(key):
+        gc.collect()
         timings[key] = time.time()
         report(key, 0.0)
+
+    def emit(stem_id, audio, label, group, color, note=""):
+        audio_io.write(stems_dir / f"{stem_id}.wav", audio, final=True)
+        level = audio_io.rms_db(audio)
+        tracks[stem_id] = {
+            "id": stem_id, "label": label, "group": group, "color": color, "note": note,
+            "file": f"{stem_id}.wav", "rms_db": round(float(level), 1), "empty": bool(level < SILENT_DB),
+            "peaks": audio_io.peaks(audio),
+        }
+
+    def read(path):
+        return audio_io.match_length(audio_io.read(path), n)
 
     # 1. decode
     stage("decode")
@@ -71,7 +109,10 @@ def run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
     duration = audio_io.decode_to_wav(source, mix_path)
     mix = audio_io.read(mix_path)
     n = len(mix)
+    mix_db = audio_io.rms_db(mix)
+    original_peaks = audio_io.peaks(mix)
     audio_io.write(stems_dir / "original.wav", mix, final=True)
+    del mix
 
     # 2. vocals / instrumental
     stage("vocals")
@@ -79,30 +120,35 @@ def run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
     vocals_path = separate.pick(out, "vocals")
     inst_path = separate.pick(out, "instrumental", "other")
 
-    # 3. instruments
+    # 3. instruments: everything except the drums is final straight away
     stage("instruments")
     out = separate.run_model(separate.INSTRUMENTS_MODEL, inst_path, work, progress=lambda f: report("instruments", f))
-    inst = {name: audio_io.match_length(audio_io.read(p), n) for name, p in out.items()}
-    bleed = inst.pop("vocals", None)
+    drums_path = out.get("drums")
+    bleed_path = out.get("vocals")  # vocal leakage left in the instrumental; joins the backing vocals
+    for name, path in out.items():
+        if name in ("drums", "vocals"):
+            continue
+        emit(name, read(path), *STEM_STYLE.get(name, (name.title(), "instruments", "#8fa3bf")))
 
     # 4. drum kit
-    drum_parts: dict[str, np.ndarray] = {}
-    if options.get("drumkit", True) and "drums" in inst:
-        stage("drumkit")
-        drums = inst.pop("drums")
-        if audio_io.rms_db(drums) > SILENT_DB:
-            drums_path = work / "drums.wav"
-            audio_io.write(drums_path, drums)
+    if drums_path:
+        drums = read(drums_path)
+        if options.get("drumkit", True) and audio_io.rms_db(drums) > SILENT_DB:
+            stage("drumkit")
             out = separate.run_model(separate.DRUMKIT_MODEL, drums_path, work, progress=lambda f: report("drumkit", f))
-            for name, p in out.items():
-                key = {"hh": "hihat", "kick": "kick", "snare": "snare", "toms": "toms",
-                       "ride": "ride", "crash": "crash"}.get(name, name)
-                drum_parts[key] = audio_io.match_length(audio_io.read(p), n)
-            rest = drums - sum(drum_parts.values())
+            rest = drums.copy()
+            for name, path in out.items():
+                key = {"hh": "hihat"}.get(name, name)
+                part = read(path)
+                rest -= part
+                emit(key, part, *STEM_STYLE.get(key, (key.title(), "drums", "#e0a27a")))
+                del part
             if audio_io.rms_db(rest) > audio_io.rms_db(drums) - 18:
-                drum_parts["drums_rest"] = rest
+                emit("drums_rest", rest, *STEM_STYLE["drums_rest"])
+            del rest
         else:
-            drum_parts["drums"] = drums
+            emit("drums", drums, *STEM_STYLE["drums"])
+        del drums
 
     # 5. de-reverb
     stage("dereverb")
@@ -112,15 +158,22 @@ def run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
     reverb_path = out.get("reverb") or out.get("no dry") or out.get("other")
     if not dry_path or not reverb_path:
         raise RuntimeError(f"Unexpected de-reverb stems: {list(out)}")
-    reverb = audio_io.match_length(audio_io.read(reverb_path), n)
+    emit("reverb", read(reverb_path), *STEM_STYLE["reverb"])
 
     # 6. lead / backing
     stage("leadback")
     out = separate.run_model(separate.KARAOKE_MODEL, dry_path, work, progress=lambda f: report("leadback", f))
-    lead = audio_io.match_length(audio_io.read(separate.pick(out, "vocals")), n)
-    backing = audio_io.match_length(audio_io.read(separate.pick(out, "instrumental", "karaoke", "other")), n)
-    if bleed is not None:
-        backing = backing + bleed
+    lead = read(separate.pick(out, "vocals"))
+    backing = read(separate.pick(out, "instrumental", "karaoke", "other"))
+    if bleed_path:
+        backing += read(bleed_path)
+    lead_db = audio_io.rms_db(lead)
+    voices_db = audio_io.rms_db(lead + backing)
+    emit("backing", backing, *STEM_STYLE["backing"])
+    del backing
+    # The karaoke model always leaves a little residue in "backing"; that's not backing vocals.
+    if tracks["backing"]["rms_db"] < lead_db - 20:
+        tracks["backing"]["empty"] = True
 
     # 7. singers
     stage("singers")
@@ -129,60 +182,36 @@ def run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
     else:
         singer_audio, singer_info, labels = [lead], [singers.Singer(0, 0, 0)], np.zeros(1, dtype=int)
     singers._embedder = None  # free VRAM for Whisper
-
-    # 8. lyrics
-    stage("lyrics")
-    words = {"language": None, "lines": []}
-    if options.get("lyrics", True):
-        dry = audio_io.match_length(audio_io.read(dry_path), n)
-        words = lyrics.transcribe(dry, options.get("language") or None, progress=lambda f: report("lyrics", f))
-        lyrics.unload()
-        if len(singer_info) > 1:
-            lyrics.assign_singers(words, labels, singers.FRAME)
-
-    # 9. write everything out
-    stage("finalize")
-    tracks = []
-
-    def emit(stem_id, audio, label, group, color, note=""):
-        audio_io.write(stems_dir / f"{stem_id}.wav", audio, final=True)
-        level = audio_io.rms_db(audio)
-        tracks.append({
-            "id": stem_id, "label": label, "group": group, "color": color, "note": note,
-            "file": f"{stem_id}.wav", "rms_db": round(float(level), 1), "empty": bool(level < SILENT_DB),
-            "peaks": audio_io.peaks(audio),
-        })
-
+    del lead
     singer_names = []
     for s, audio in zip(singer_info, singer_audio):
         name = f"Singer {chr(65 + s.index)}" if len(singer_info) > 1 else "Lead vocal"
         singer_names.append(name)
         note = f"{s.register}" + (f" · ~{s.median_f0:.0f} Hz" if s.median_f0 else "")
         emit(f"singer_{s.index}", audio, name, "voices", SINGER_COLORS[s.index % len(SINGER_COLORS)], note)
-    emit("backing", backing, *STEM_STYLE["backing"])
-    # The karaoke model always leaves a little residue in "backing"; that's not backing vocals.
-    if tracks[-1]["rms_db"] < audio_io.rms_db(lead) - 20:
-        tracks[-1]["empty"] = True
-    emit("reverb", reverb, *STEM_STYLE["reverb"])
+    del singer_audio
+    audio = None
+
     # Instrumentals: the vocal model always finds *something* (synth leads, leakage). If all voices
     # together sit 24 dB+ under the mix, there's no singing here, so flag the vocal tracks as silent.
-    instrumental = audio_io.rms_db(lead + backing) < audio_io.rms_db(mix) - 24
+    instrumental = voices_db < mix_db - 24
     if instrumental:
-        words = {"language": None, "lines": []}  # anything Whisper "heard" would be hallucinated
-        for t in tracks:
+        for t in tracks.values():
             if t["group"] == "voices":
                 t["empty"] = True
-    for key in ["kick", "snare", "toms", "hihat", "ride", "crash", "drums", "drums_rest"]:
-        if key in drum_parts:
-            emit(key, drum_parts[key], *STEM_STYLE[key])
-    if "drums" in inst:
-        emit("drums", inst.pop("drums"), *STEM_STYLE["drums"])
-    for key in ["bass", "guitar", "piano", "other"]:
-        if key in inst:
-            emit(key, inst.pop(key), *STEM_STYLE[key])
-    for key, audio in inst.items():  # anything unexpected the model produced
-        emit(key, audio, key.title(), "instruments", "#8fa3bf")
 
+    # 8. lyrics. The process holds almost no audio by now, which leaves room for Whisper.
+    stage("lyrics")
+    words = {"language": None, "lines": []}
+    if options.get("lyrics", True) and not instrumental:  # on instrumentals Whisper would only hallucinate
+        words = lyrics.transcribe(read(dry_path), options.get("language") or None,
+                                  progress=lambda f: report("lyrics", f))
+        lyrics.unload()
+        if len(singer_info) > 1:
+            lyrics.assign_singers(words, labels, singers.FRAME)
+
+    # 9. write everything out
+    stage("finalize")
     if words["lines"]:
         (job_dir / "lyrics.lrc").write_text(lyrics.to_lrc(words, singer_names), encoding="utf-8")
         (job_dir / "lyrics.srt").write_text(lyrics.to_srt(words, singer_names), encoding="utf-8")
@@ -190,8 +219,8 @@ def run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
 
     result = {
         "duration": duration,
-        "tracks": tracks,
-        "original": {"file": "original.wav", "peaks": audio_io.peaks(mix)},
+        "tracks": sorted(tracks.values(), key=_display_key),
+        "original": {"file": "original.wav", "peaks": original_peaks},
         "singers": [{"name": nm, "color": SINGER_COLORS[i % len(SINGER_COLORS)], "register": s.register,
                      "median_f0": round(s.median_f0, 1), "seconds": round(s.seconds, 1)}
                     for i, (nm, s) in enumerate(zip(singer_names, singer_info))],
@@ -200,8 +229,6 @@ def run(job_dir: Path, source: Path, options: dict, report: Report) -> dict:
         "timings": {k: round(v, 1) for k, v in _durations(timings).items()},
     }
     (job_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
-    if not os.environ.get("WAVY_KEEP_WORK"):
-        shutil.rmtree(work, ignore_errors=True)
     return result
 
 

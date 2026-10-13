@@ -1,6 +1,7 @@
 """HTTP API + static UI.  Run:  python -m server.app  (or start.bat)"""
 import json
 import os
+import shutil
 from contextlib import asynccontextmanager
 import re
 import zipfile
@@ -95,6 +96,21 @@ def rename_job(job_id: str, body: dict):
     return jobs.update(job_id, name=name)
 
 
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    _job_or_404(job_id)
+    return jobs.cancel(job_id)
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str):
+    _job_or_404(job_id)
+    try:
+        return jobs.retry(job_id)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str):
     _job_or_404(job_id)
@@ -162,7 +178,7 @@ def health():
     import torch
 
     return {"ok": True, "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-            "demo": DEMO.exists()}
+            "demo": DEMO.exists(), "ffmpeg": shutil.which("ffmpeg") is not None}
 
 
 app.mount("/", StaticFiles(directory=WEB, html=True), name="web")

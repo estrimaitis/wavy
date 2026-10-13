@@ -15,7 +15,10 @@ def decode_to_wav(src: Path, dst: Path) -> float:
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(src), "-vn", "-ac", "2", "-ar", str(SR), "-c:a", "pcm_f32le", str(dst),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg isn't installed (or isn't on PATH). Install it, restart Wavy, then retry.")
     if result.returncode != 0:
         detail = next((ln for ln in result.stderr.strip().splitlines() if "@" in ln), result.stderr.strip()[-200:])
         detail = detail.split("]", 1)[-1].strip()

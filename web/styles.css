@@ -125,7 +125,9 @@ h1, h2 { margin: 0; letter-spacing: -0.02em; }
 .stages li.skipped { text-decoration: line-through; opacity: .5; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .hint { color: var(--faint); font-size: 13px; }
-#proc-retry { margin-top: 14px; }
+.proc-actions { display: flex; gap: 8px; margin-top: 16px; }
+.banner { background: #3a1d22; color: #ffc9cf; border-bottom: 1px solid #5c2a32; padding: 10px 28px; font-size: 13.5px; }
+.pill.cancelled { color: var(--muted); }
 .error { margin-top: 16px; padding: 14px 16px; border-radius: 10px; background: rgba(255, 107, 107, .08); border: 1px solid rgba(255, 107, 107, .3); color: #ffb3b3; white-space: pre-wrap; font-size: 13.5px; }
 
 /* ---------- mixer ---------- */
@@ -159,6 +161,7 @@ h1, h2 { margin: 0; letter-spacing: -0.02em; }
 .ab { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 3px; }
 .ab button { border: none; background: transparent; padding: 5px 12px; border-radius: 7px; cursor: pointer; color: var(--muted); font-weight: 550; }
 .ab button.on { background: #262d3d; color: var(--text); }
+.ab button:disabled { opacity: .4; cursor: default; }
 .master { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .loading { color: var(--faint); font-size: 13px; margin-left: auto; }
 

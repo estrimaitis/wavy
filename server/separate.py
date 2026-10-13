@@ -59,6 +59,10 @@ def run_model(model: str, input_path: Path, out_dir: Path, progress=None) -> dic
         output_format="WAV",
         sample_rate=44100,
         use_autocast=torch.cuda.is_available(),
+        # Overlap 2 instead of the models' default 4: twice as fast, and on our ground-truth test the
+        # vocal SDR moved from 18.18 to 18.13 dB (inaudible). Batching didn't help on GPU.
+        mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1,
+                     "overlap": 2, "pitch_shift": 0},
     )
     separator.load_model(model_filename=model)
     with _tqdm_progress(progress):

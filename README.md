@@ -35,8 +35,9 @@ The first launch installs everything into a local `.venv`. Your first song also 
 3 GB of AI models. After that, Wavy opens at **http://localhost:7860**: drag a song (MP3, WAV,
 FLAC, M4A, OGG, AIFF, or even a video file) anywhere onto the page.
 
-**Hardware:** an NVIDIA GPU is strongly recommended. A 4-minute song takes about 2 to 3 minutes on an
-RTX 5080. CPU and Apple Silicon work, just much slower. Developed and tested on Windows 11; the
+**Hardware:** an NVIDIA GPU is strongly recommended. On an RTX 5080 a song takes roughly 60% of its
+own length (a 6-minute song in about 3.5 minutes). Peak RAM stays under 7 GB even for a 12-minute
+song, so 16 GB machines are fine. CPU and Apple Silicon work, just much slower. Developed and tested on Windows 11; the
 macOS/Linux scripts are untested.
 
 | Drop a song | Watch it come apart |
@@ -86,6 +87,8 @@ The separation models run through [python-audio-separator](https://github.com/no
   identity. The lead/backing model pulls most harmonies onto the backing track, and the rest goes
   to whoever dominates at that moment. Turn-taking duets (verse/verse, call-and-response) split
   cleanly.
+- Singers are told apart by voice identity, not pitch, so one singer jumping to a higher register
+  for the chorus stays one singer.
 - "Singer A / B" are named by order of appearance. The *lower voice / higher voice* note comes
   from measured pitch. The app doesn't guess anyone's gender.
 - "Synths & other" is the catch-all for anything that isn't vocals, drums, bass, guitar or piano:
@@ -108,13 +111,40 @@ against those ingredients (SDR in dB; higher is better, and above 10 is clean):
 | Bass | 20.5 dB |
 | Synth pad | 17.9 dB |
 
-The lyrics came back word-perfect, and each line went to the right singer. To reproduce:
+The lyrics came back word-perfect, and each line went to the right singer.
+
+`tools/singer_bench.py` checks the singer split on scenarios with a known answer:
+
+| Scenario | Singers found | Per-voice SDR |
+|---|---|---|
+| Solo male, verse + chorus 5 semitones higher | 1 of 1 | 13.2 dB |
+| Solo female, verse + chorus 5 semitones higher | 1 of 1 | 15.2 dB |
+| Duet, alternating lines | 2 of 2 | 14.1 / 13.9 dB |
+| Duet, high male vs. female | 2 of 2 | 14.7 / 14.6 dB |
+| Duet, trading half-lines back to back | 2 of 2 | 11.8 / 13.9 dB |
+| Duet, last two lines sung together | 2 of 2 | 2.3 / 3.0 dB (overlap can't be split, see limits) | To reproduce:
 
 ```
 rem setup.bat already generated samples\demo_duet.wav and its ground truth (Windows only)
 .venv\Scripts\python -m server.cli samples\demo_duet.wav data\cli\demo
 .venv\Scripts\python tools\evaluate.py data\cli\demo samples\demo_duet_truth
 ```
+
+## Tests
+
+```bat
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+rem 25 fast unit + API tests, a few seconds
+.venv\Scripts\python -m pytest -m "not slow"
+rem the real models on awkward inputs, about 15 minutes on a GPU
+.venv\Scripts\python -m pytest -m slow
+rem singer-split scenarios with known answers (Windows, uses the built-in voices)
+.venv\Scripts\python tools\singer_bench.py
+```
+
+The slow suite throws mono, 8 kHz, 96 kHz, 5.1 surround, Opus, video files, non-English
+filenames, 1-second clips, digital silence, pure noise, a video with no audio, an empty file and a
+12-minute song at the pipeline, and checks it either succeeds or fails with a readable message.
 
 ## Project layout
 

@@ -16,6 +16,11 @@ DATA.mkdir(parents=True, exist_ok=True)
 
 _lock = threading.RLock()  # Windows can't replace a file another thread has open: guard reads too
 _queue: "queue.Queue[str]" = queue.Queue()
+_cancel_requested: set[str] = set()
+
+
+class Cancelled(Exception):
+    pass
 _TOTAL_WEIGHT = sum(w for _, _, w in pipeline.STAGES)
 
 
@@ -102,6 +107,8 @@ def _process(job_id: str) -> None:
         now = time.time()
         if stage == last["stage"] and now - last["t"] < 0.4:  # progress bars tick fast; don't thrash the disk
             return
+        if job_id in _cancel_requested:
+            raise Cancelled()
         last.update(stage=stage, t=now)
         done = sum(weights[k] for k in order[: order.index(stage)])
         update(job_id, status="running", stage=stage,
@@ -112,8 +119,12 @@ def _process(job_id: str) -> None:
         pipeline.run(_path(job_id), _path(job_id) / job["source"], job.get("options", {}), report)
         update(job_id, status="done", stage=None, progress=1.0, finished=time.time(),
                elapsed=round(time.time() - started, 1))
+    except Cancelled:
+        update(job_id, status="cancelled", stage=None, finished=time.time())
     except Exception as e:  # surface the failure to the UI instead of dying silently
         traceback.print_exc()
+        if "out of memory" in str(e).lower():
+            e = RuntimeError("Ran out of GPU memory. Close other GPU-heavy apps (games, other AI tools) and retry.")
         update(job_id, status="error", error=str(e) if isinstance(e, RuntimeError) else f"{type(e).__name__}: {e}",
                finished=time.time())
 
@@ -122,9 +133,37 @@ def _worker():
     while True:
         job_id = _queue.get()
         try:
+            if load(job_id)["status"] != "queued":  # cancelled or deleted while waiting
+                continue
             _process(job_id)
+        except KeyError:
+            continue
         except Exception:
             traceback.print_exc()
+        finally:
+            _cancel_requested.discard(job_id)
+
+
+def cancel(job_id: str) -> dict:
+    with _lock:
+        job = load(job_id)
+        if job["status"] == "queued":
+            return update(job_id, status="cancelled")
+        if job["status"] == "running":
+            _cancel_requested.add(job_id)
+            return update(job_id, cancelling=True)
+        return job
+
+
+def retry(job_id: str) -> dict:
+    with _lock:
+        job = load(job_id)
+        if job["status"] not in ("error", "cancelled"):
+            raise RuntimeError("Only failed or cancelled songs can be retried")
+        job = update(job_id, status="queued", stage=None, progress=0.0, error=None, cancelling=False,
+                     created=time.time())
+    _queue.put(job_id)
+    return job
 
 
 def start_worker() -> None:
